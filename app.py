@@ -5,117 +5,108 @@ import urllib3
 from datetime import datetime, timedelta
 import time
 
-# 忽略 SSL 安全性警告
+# 1. 強制忽略 SSL 憑證警告 (解決您的 SSL 問題)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="台股成交量對比工具", layout="wide")
+st.set_page_config(page_title="台股成交量對比分析", layout="wide")
 
 def fetch_twse_data(date_obj):
-    """從證交所抓取指定日期的成交量數據"""
+    """抓取證交所資料的後端核心"""
+    # 格式必須為 YYYYMMDD (西元)
     date_str = date_obj.strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/rwd/zh/trading/historical/mi_stock20?date={date_str}&response=json"
     
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
     try:
-        # 使用 verify=False 並加上 Headers 模擬瀏覽器，減少被阻擋機率
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, timeout=15, verify=False, headers=headers)
-        
+        # verify=False 繞過 SSL 驗證
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
         if response.status_code != 200:
-            return None, f"HTTP 錯誤: {response.status_code}"
+            return None
         
         data = response.json()
-        if data.get('stat') == 'OK':
+        
+        # 檢查證交所回傳狀態
+        if data.get('stat') == 'OK' and 'data' in data:
             df = pd.DataFrame(data['data'], columns=data['fields'])
+            # 取得前 15 名
             df = df.head(15).copy()
-            # 轉換數值欄位以利後續分析
-            df['成交股數'] = df['成交股數'].str.replace(',', '').astype(float)
-            return df[['排名', '證券代號', '證券名稱', '成交股數']], "OK"
-        
-        return None, data.get('stat', '該日非交易日或無資料')
-    except Exception as e:
-        return None, f"連線異常: {str(e)}"
+            # 清洗數據：移除數字中的逗號
+            df['成交股數'] = df['成交股數'].str.replace(',', '')
+            return df[['排名', '證券代號', '證券名稱', '成交股數']]
+        return None
+    except:
+        return None
 
-def find_latest_two_trade_days():
-    """搜尋最近兩個有資料的交易日"""
-    found_data = []
-    # 從當天（或昨天）開始搜尋
-    current_date = datetime.now()
+# --- UI 介面 ---
+st.title("📈 台股成交量 TOP 15 變動對照")
+st.info("系統將自動抓取最近兩個有效的交易日資料進行分析")
+
+if st.button("🔄 執行數據比對"):
+    found_days = []
+    # 從當天往前搜尋最多 20 天，確保能跨越連假
+    search_date = datetime.now()
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # 最多搜尋過去 15 天
-    search_range = 15
-    for i in range(search_range):
-        target_date = current_date - timedelta(days=i)
+    with st.spinner("正在檢索證交所 API..."):
+        for i in range(20):
+            target_date = search_date - timedelta(days=i)
+            # 略過週末
+            if target_date.weekday() >= 5:
+                continue
+                
+            df = fetch_twse_data(target_date)
+            if df is not None:
+                found_days.append({
+                    "date": target_date.strftime("%Y-%m-%d"),
+                    "data": df
+                })
+            
+            # 找到兩天就停止
+            if len(found_days) == 2:
+                break
+            # 稍微延遲避免頻率過快
+            time.sleep(0.5)
+
+    if len(found_days) == 2:
+        day1 = found_days[0] # 最近的一天 (例如 05-06)
+        day2 = found_days[1] # 前一天 (例如 05-05)
         
-        # 進度條更新
-        progress = (i + 1) / search_range
-        progress_bar.progress(progress)
-        status_text.text(f"正在檢查日期: {target_date.strftime('%Y-%m-%d')}...")
-
-        # 週末通常沒資料，直接跳過節省額度
-        if target_date.weekday() >= 5:
-            continue
-            
-        df, status = fetch_twse_data(target_date)
-        if status == "OK":
-            found_data.append((target_date.strftime("%Y-%m-%d"), df))
-            # 找到資料後稍微停頓，保護 API
-            time.sleep(1.2) 
-            
-        if len(found_data) == 2:
-            break
-            
-    progress_bar.empty()
-    status_text.empty()
-    return found_data
-
-# --- 介面設計 ---
-st.title("📊 台股成交量 TOP 15 變動對比")
-
-if st.button("🔍 獲取最新對比數據"):
-    results = find_latest_two_trade_days()
-    
-    if len(results) == 2:
-        (date_today, df_today), (date_prev, df_prev) = results
-        
-        # 顯示基礎數據
         col1, col2 = st.columns(2)
         with col1:
-            st.success(f"📅 最新交易日：{date_today}")
-            st.dataframe(df_today, hide_index=True, use_container_width=True)
+            st.subheader(f"📅 本日 ({day1['date']})")
+            st.dataframe(day1['data'], use_container_width=True, hide_index=True)
         with col2:
-            st.info(f"📅 前一交易日：{date_prev}")
-            st.dataframe(df_prev, hide_index=True, use_container_width=True)
+            st.subheader(f"📅 前日 ({day2['date']})")
+            st.dataframe(day2['data'], use_container_width=True, hide_index=True)
             
-        # --- 異動分析 ---
+        # --- 比較邏輯 ---
         st.divider()
-        st.subheader("💡 進榜異動分析")
+        st.subheader("🔍 榜單變動分析")
         
-        today_codes = set(df_today['證券代號'])
-        prev_codes = set(df_prev['證券代號'])
+        # 使用證券代號作為唯一識別
+        now_codes = set(day1['data']['證券代號'])
+        prev_codes = set(day2['data']['證券代號'])
         
-        new_in = today_codes - prev_codes
-        drop_out = prev_codes - today_codes
+        new_in = now_codes - prev_codes
+        out_list = prev_codes - now_codes
         
-        ans1, ans2 = st.columns(2)
-        with ans1:
-            st.write("### 🆕 新進入前15名")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.success("✨ **新進榜名單 (昨日未在前15)**")
             if new_in:
-                st.table(df_today[df_today['證券代號'].isin(new_in)][['證券代號', '證券名稱']])
+                new_df = day1['data'][day1['data']['證券代號'].isin(new_in)]
+                st.table(new_df[['證券代號', '證券名稱']])
             else:
-                st.write("無新進榜證券")
+                st.write("名單無變動")
                 
-        with ans2:
-            st.write("### ❌ 跌出前15名")
-            if drop_out:
-                st.table(df_prev[df_prev['證券代號'].isin(drop_out)][['證券代號', '證券名稱']])
+        with c2:
+            st.warning("📉 **掉出榜名單 (本日跌出前15)**")
+            if out_list:
+                out_df = day2['data'][day2['data']['證券代號'].isin(out_list)]
+                st.table(out_df[['證券代號', '證券名稱']])
             else:
-                st.write("無證券跌出榜單")
+                st.write("無證券掉出榜單")
     else:
-        st.error(f"❌ 搜尋了過去 15 天仍無法湊齊兩個交易日的資料。")
-        st.warning("原因可能是：\n1. 證交所 API 暫時限制您的 IP 訪問（請等待 5 分鐘再試）。\n2. 目前正值長假期間。\n3. 網路連線至證交所不穩定。")
-
-st.sidebar.markdown("### 🛠 系統檢查")
-st.sidebar.write(f"最後檢查時間: {datetime.now().strftime('%H:%M:%S')}")
+        st.error("無法抓取足夠資料。請確認目前是否為交易時間（下午2點後資料較齊全），或請稍後再試。")
